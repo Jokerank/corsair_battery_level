@@ -3,6 +3,8 @@ Displays the current state and battery level of a Corsair headset as a tray icon
 
 It should work with most corsair headsets.
 
+This fork adds support for the Corsair Virtuoso RGB Wireless XT.
+
 ![](https://user-images.githubusercontent.com/47293197/107494250-3c401b00-6b97-11eb-902e-2fbc47553d89.png)
 
 ## Usage 
