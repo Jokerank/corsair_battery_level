@@ -13,6 +13,19 @@ You can either download the [latest build](https://github.com/SaifAqqad/corsair_
 ## Build instructions
 Run `npm i` then run the build script `npm run build`
 
+## Rust build
+This fork also includes a Rust tray implementation in `rust/`.
+
+Build it with:
+```sh
+cd rust
+cargo build --release
+```
+
+The release binary is written to `rust/target/release/corsair-battery-level-rs.exe`.
+
+To test HID polling from the console, run `cargo run -- --status`.
+
 ## Dependencies:
 * [node-hid](https://github.com/node-hid/node-hid)
 * [systray2](https://github.com/felixhao28/node-systray)
