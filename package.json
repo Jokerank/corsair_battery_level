@@ -31,7 +31,7 @@
       "node_modules/systray2/traybin/tray_windows_release.exe"
     ],
     "targets": [
-      "win"
+      "node18-win-x64"
     ],
     "output" : "corsair_battery_level.exe"
   }
