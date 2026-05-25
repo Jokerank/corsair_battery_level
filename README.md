@@ -5,7 +5,7 @@ It should work with most corsair headsets.
 
 This fork adds support for the Corsair Virtuoso RGB Wireless XT.
 
-![](https://user-images.githubusercontent.com/47293197/107494250-3c401b00-6b97-11eb-902e-2fbc47553d89.png)
+<img width="374" height="104" alt="image" src="https://github.com/user-attachments/assets/03e891ee-b727-4a62-aa3f-d6e345fea453" />
 
 ## Usage 
 You can either download the [latest build](https://github.com/SaifAqqad/corsair_battery_level/releases/latest/) and run it, or if you have node installed, you can clone the repo, run `npm i` then `node app.js`
