@@ -2,24 +2,29 @@
 
 use hidapi::{HidApi, HidDevice, HidError};
 use std::cell::RefCell;
+use std::ffi::c_void;
 use std::ffi::OsStr;
 use std::iter::once;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, HGDIOBJ, RGBQUAD,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyIcon, DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW,
-    PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer, TrackPopupMenu,
-    TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HICON, IDI_APPLICATION, MF_STRING,
-    MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
+    DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage,
+    RegisterClassW, SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, HICON, ICONINFO, IDI_APPLICATION, MF_STRING, MSG, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_RIGHTBUTTON, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP,
+    WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 const APP_NAME: &str = "Corsair battery level";
@@ -40,20 +45,8 @@ const MENU_REFRESH: usize = 1001;
 const MENU_EXIT: usize = 1002;
 const TRAY_UID: u32 = 1;
 const WM_TRAYICON: u32 = WM_USER + 1;
-
-static ICON_DEFAULT: &[u8] = include_bytes!("../../icons/headphones.ico");
-static ICON_CHARGING: &[u8] = include_bytes!("../../icons/battery-charging.ico");
-static ICON_100: &[u8] = include_bytes!("../../icons/battery-wireless.ico");
-static ICON_90: &[u8] = include_bytes!("../../icons/battery-wireless-90.ico");
-static ICON_80: &[u8] = include_bytes!("../../icons/battery-wireless-80.ico");
-static ICON_70: &[u8] = include_bytes!("../../icons/battery-wireless-70.ico");
-static ICON_60: &[u8] = include_bytes!("../../icons/battery-wireless-60.ico");
-static ICON_50: &[u8] = include_bytes!("../../icons/battery-wireless-50.ico");
-static ICON_40: &[u8] = include_bytes!("../../icons/battery-wireless-40.ico");
-static ICON_30: &[u8] = include_bytes!("../../icons/battery-wireless-30.ico");
-static ICON_20: &[u8] = include_bytes!("../../icons/battery-wireless-20.ico");
-static ICON_10: &[u8] = include_bytes!("../../icons/battery-wireless-10.ico");
-static ICON_0: &[u8] = include_bytes!("../../icons/battery-wireless-0.ico");
+const ICON_SIZE: usize = 32;
+const ICON_PIXELS: usize = ICON_SIZE * ICON_SIZE;
 
 #[derive(Clone, Copy)]
 enum Protocol {
@@ -305,7 +298,7 @@ fn with_app(action: impl FnOnce(&mut TrayApp)) {
 
 impl TrayApp {
     fn new(hwnd: HWND) -> Result<Self, String> {
-        let icon = load_icon(ICON_DEFAULT)?;
+        let icon = create_status_icon(None)?;
         let mut app = Self {
             hwnd,
             current_icon: null_mut(),
@@ -318,13 +311,12 @@ impl TrayApp {
         match poll_status() {
             Ok(Some((device, status))) => {
                 let tooltip = format_tooltip(&device, &status);
-                let icon = status_icon(&status);
-                if let Ok(icon) = load_icon(icon) {
+                if let Ok(icon) = create_status_icon(Some(&status)) {
                     let _ = self.update(icon, &tooltip);
                 }
             }
             Ok(None) | Err(_) => {
-                if let Ok(icon) = load_icon(ICON_DEFAULT) {
+                if let Ok(icon) = create_status_icon(None) {
                     let _ = self.update(icon, "No device found");
                 }
             }
@@ -501,26 +493,342 @@ fn format_tooltip(device: &ConnectedDevice, status: &DeviceStatus) -> String {
     }
 }
 
-fn status_icon(status: &DeviceStatus) -> &'static [u8] {
-    if !status.connected || status.battery.is_none() {
-        return ICON_DEFAULT;
+fn create_status_icon(status: Option<&DeviceStatus>) -> Result<HICON, String> {
+    let mut canvas = Canvas::new();
+    match status {
+        Some(status) if status.connected => {
+            if let Some(battery) = status.battery {
+                draw_battery_icon(&mut canvas, battery, status.charging);
+            } else {
+                draw_disconnected_icon(&mut canvas);
+            }
+        }
+        _ => draw_disconnected_icon(&mut canvas),
     }
-    if status.charging && status.battery.unwrap_or(0) < 100 {
-        return ICON_CHARGING;
+    create_icon_from_pixels(&canvas.pixels)
+}
+
+fn draw_battery_icon(canvas: &mut Canvas, battery: u8, charging: bool) {
+    if charging && battery < 100 {
+        draw_mask(canvas, &CHARGING_ICON_MASK, WHITE);
+    } else {
+        draw_mask(canvas, &WIRELESS_ICON_MASK, WHITE);
+        apply_battery_level(canvas, battery);
+    }
+}
+
+fn draw_disconnected_icon(canvas: &mut Canvas) {
+    draw_mask(canvas, &HEADPHONES_ICON_MASK, WHITE);
+}
+
+fn draw_mask(canvas: &mut Canvas, mask: &[&str; ICON_SIZE], color: u32) {
+    for (y, row) in mask.iter().enumerate() {
+        for (x, marker) in row.as_bytes().iter().enumerate() {
+            if let Some(alpha) = mask_alpha(*marker) {
+                canvas.blend_pixel(x as i32, y as i32, with_alpha(color, alpha));
+            }
+        }
+    }
+}
+
+fn apply_battery_level(canvas: &mut Canvas, battery: u8) {
+    let battery = battery.min(100);
+    if battery == 100 {
+        return;
     }
 
-    match status.battery.unwrap_or(0) / 10 {
-        10 => ICON_100,
-        9 => ICON_90,
-        8 => ICON_80,
-        7 => ICON_70,
-        6 => ICON_60,
-        5 => ICON_50,
-        4 => ICON_40,
-        3 => ICON_30,
-        2 => ICON_20,
-        1 => ICON_10,
-        _ => ICON_0,
+    draw_battery_cutout_top(canvas);
+
+    let empty_rows = ((100 - battery) as f32 * 18.0 / 100.0).ceil() as i32;
+    let fill_y = (8 + empty_rows).clamp(9, 26);
+
+    for y in 9..fill_y {
+        draw_empty_battery_row(canvas, y);
+    }
+    draw_battery_fill_boundary(canvas, fill_y, battery);
+}
+
+fn draw_battery_cutout_top(canvas: &mut Canvas) {
+    canvas.set_pixel(5, 8, with_alpha(WHITE, 128));
+    for x in 6..=15 {
+        canvas.set_pixel(x, 8, with_alpha(WHITE, 24));
+    }
+    canvas.set_pixel(16, 8, with_alpha(WHITE, 64));
+}
+
+fn draw_empty_battery_row(canvas: &mut Canvas, y: i32) {
+    canvas.set_pixel(5, y, with_alpha(WHITE, 64));
+    for x in 6..=14 {
+        canvas.set_pixel(x, y, 0);
+    }
+    canvas.set_pixel(15, y, with_alpha(WHITE, 24));
+}
+
+fn draw_battery_fill_boundary(canvas: &mut Canvas, y: i32, battery: u8) {
+    if battery == 0 {
+        canvas.set_pixel(5, y, with_alpha(WHITE, 128));
+        for x in 6..=14 {
+            canvas.set_pixel(x, y, with_alpha(WHITE, 64));
+        }
+        canvas.set_pixel(15, y, with_alpha(WHITE, 128));
+        return;
+    }
+
+    for x in 5..=15 {
+        canvas.set_pixel(x, y, with_alpha(WHITE, 196));
+    }
+}
+
+fn mask_alpha(marker: u8) -> Option<u8> {
+    match marker {
+        b'1' => Some(24),
+        b'2' => Some(64),
+        b'3' => Some(128),
+        b'4' => Some(196),
+        b'#' => Some(255),
+        _ => None,
+    }
+}
+
+const fn with_alpha(color: u32, alpha: u8) -> u32 {
+    (color & 0x00FF_FFFF) | ((alpha as u32) << 24)
+}
+
+const WHITE: u32 = argb(255, 250, 250, 250);
+
+const WIRELESS_ICON_MASK: [&str; 32] = [
+    "................................",
+    "................................",
+    "......222222222.................",
+    "......2#######4.................",
+    "......2#######4.................",
+    "..13444#######44432.............",
+    "..2###############3......121....",
+    "..2###############4.....12431...",
+    "..2###############4.....14##2...",
+    "..2###############4......2##42..",
+    "..2###############4..122.13##3..",
+    "..2###############4..2#41.24#41.",
+    "..2###############4.13##3.13##2.",
+    "..2###############4..24#41.2##3.",
+    "..2###############4...3##2.2##3.",
+    "..2###############4...3##2.2##3.",
+    "..2###############4...3##2.2##3.",
+    "..2###############4...3##2.2##3.",
+    "..2###############4..24#41.2##3.",
+    "..2###############4.13##3.13##2.",
+    "..2###############4..2#41.24#41.",
+    "..2###############4..122.13##3..",
+    "..2###############4......2##42..",
+    "..2###############4.....14##2...",
+    "..2###############4......2431...",
+    "..2###############4......121....",
+    "..2###############4.............",
+    "..2###############4.............",
+    "..2###############3.............",
+    "..12222222222222221.............",
+    "................................",
+    "................................",
+];
+
+const CHARGING_ICON_MASK: [&str; 32] = [
+    "................................",
+    "................................",
+    "...........1222222221...........",
+    "...........1########1...........",
+    "...........1########1...........",
+    "........2344########4432........",
+    ".......14##############41.......",
+    ".......1################1.......",
+    ".......1################1.......",
+    ".......1################1.......",
+    ".......1########44######1.......",
+    ".......1########24######1.......",
+    ".......1#######314######1.......",
+    ".......1#######2.4######1.......",
+    ".......1######31.4######1.......",
+    ".......1#####42..4######1.......",
+    ".......1#####31..344####1.......",
+    ".......1####42.....3####1.......",
+    ".......1####3.....24####1.......",
+    ".......1####443..13#####1.......",
+    ".......1######4..24#####1.......",
+    ".......1######4.13######1.......",
+    ".......1######4.2#######1.......",
+    ".......1######413#######1.......",
+    ".......1######42########1.......",
+    ".......1######44########1.......",
+    ".......1################1.......",
+    ".......14##############41.......",
+    ".......13##############31.......",
+    "........1222222222222221........",
+    "................................",
+    "................................",
+];
+
+const HEADPHONES_ICON_MASK: [&str; 32] = [
+    "................................",
+    "...........1233333321...........",
+    ".........124########421.........",
+    "........24############42........",
+    "..121..24###42222234###42.......",
+    "..2431.24#421......124##42......",
+    ".13##31.231..........13##41.....",
+    "..24##31.1............14##3.....",
+    "...24##31..............24#42....",
+    "....3###31..............3##3....",
+    "...14####31.............2##31...",
+    "...14#44##31............14#41...",
+    "...14#424##31...........14#41...",
+    "...1##4.24##31...........4##1...",
+    "...1##4..24##31..........4##1...",
+    "...1##411124##31...1111114##1...",
+    "...1########4##31..14#######1...",
+    "...1########24##31.14#######1...",
+    "...1########124##31.24######1...",
+    "...1########1.24##31.24#####1...",
+    "...1########1..24##31.24####1...",
+    "...1########1...24##31.24###1...",
+    "...1########1....24##31.24##1...",
+    "...1########1.....24##31.2441...",
+    "...1########1......2###31.231...",
+    "...1########1......1####31.1....",
+    "...1##4444431......1344##31.....",
+    "...14#41111111111.....24##31....",
+    "....3##########41......24#42....",
+    "....14##########1.......232.....",
+    ".....123444444431........11.....",
+    "................................",
+];
+
+struct Canvas {
+    pixels: [u32; ICON_PIXELS],
+}
+
+impl Canvas {
+    fn new() -> Self {
+        Self {
+            pixels: [0; ICON_PIXELS],
+        }
+    }
+
+    fn blend_pixel(&mut self, x: i32, y: i32, src: u32) {
+        if x < 0 || y < 0 || x >= ICON_SIZE as i32 || y >= ICON_SIZE as i32 {
+            return;
+        }
+        let index = y as usize * ICON_SIZE + x as usize;
+        self.pixels[index] = blend_argb(self.pixels[index], src);
+    }
+
+    fn set_pixel(&mut self, x: i32, y: i32, color: u32) {
+        if x < 0 || y < 0 || x >= ICON_SIZE as i32 || y >= ICON_SIZE as i32 {
+            return;
+        }
+        let index = y as usize * ICON_SIZE + x as usize;
+        self.pixels[index] = color;
+    }
+}
+
+fn blend_argb(dst: u32, src: u32) -> u32 {
+    let sa = (src >> 24) & 0xFF;
+    if sa == 0 {
+        return dst;
+    }
+    if sa == 255 {
+        return src;
+    }
+
+    let da = (dst >> 24) & 0xFF;
+    let out_a = sa + (da * (255 - sa) + 127) / 255;
+    if out_a == 0 {
+        return 0;
+    }
+
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+
+    let blend_channel = |s: u32, d: u32| (s * sa + d * da * (255 - sa) / 255 + out_a / 2) / out_a;
+
+    (out_a << 24)
+        | (blend_channel(sr, dr) << 16)
+        | (blend_channel(sg, dg) << 8)
+        | blend_channel(sb, db)
+}
+
+const fn argb(a: u8, r: u8, g: u8, b: u8) -> u32 {
+    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+}
+
+fn create_icon_from_pixels(pixels: &[u32; ICON_PIXELS]) -> Result<HICON, String> {
+    unsafe {
+        let mut bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: ICON_SIZE as i32,
+                biHeight: -(ICON_SIZE as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                biSizeImage: (ICON_PIXELS * size_of::<u32>()) as u32,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [RGBQUAD {
+                rgbBlue: 0,
+                rgbGreen: 0,
+                rgbRed: 0,
+                rgbReserved: 0,
+            }],
+        };
+        let mut bits: *mut c_void = null_mut();
+        let color_bitmap = CreateDIBSection(
+            null_mut(),
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+            &mut bits,
+            null_mut(),
+            0,
+        );
+        if color_bitmap.is_null() || bits.is_null() {
+            return Err(format!("CreateDIBSection failed: {}", GetLastError()));
+        }
+
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, ICON_PIXELS);
+
+        let mask_bits = [0u8; ICON_SIZE * 4];
+        let mask_bitmap = CreateBitmap(
+            ICON_SIZE as i32,
+            ICON_SIZE as i32,
+            1,
+            1,
+            mask_bits.as_ptr() as *const c_void,
+        );
+        if mask_bitmap.is_null() {
+            DeleteObject(color_bitmap as HGDIOBJ);
+            return Err(format!("CreateBitmap mask failed: {}", GetLastError()));
+        }
+
+        let icon_info = ICONINFO {
+            fIcon: TRUE,
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask_bitmap,
+            hbmColor: color_bitmap,
+        };
+        let icon = CreateIconIndirect(&icon_info);
+        DeleteObject(color_bitmap as HGDIOBJ);
+        DeleteObject(mask_bitmap as HGDIOBJ);
+
+        if icon.is_null() {
+            return Err(format!("CreateIconIndirect failed: {}", GetLastError()));
+        }
+        Ok(icon)
     }
 }
 
@@ -548,82 +856,6 @@ unsafe fn show_menu(hwnd: HWND) {
         null(),
     );
     DestroyMenu(menu);
-}
-
-fn load_icon(ico: &[u8]) -> Result<HICON, String> {
-    let Some(image) = choose_ico_image(ico) else {
-        return Err("Invalid icon data".to_string());
-    };
-
-    unsafe {
-        let icon = CreateIconFromResourceEx(
-            image.as_ptr(),
-            image.len() as u32,
-            TRUE,
-            0x0003_0000,
-            32,
-            32,
-            0,
-        );
-        if icon.is_null() {
-            return Err(format!(
-                "CreateIconFromResourceEx failed: {}",
-                GetLastError()
-            ));
-        }
-        Ok(icon)
-    }
-}
-
-fn choose_ico_image(ico: &[u8]) -> Option<&[u8]> {
-    if ico.len() < 6 || u16_le(ico, 2)? != 1 {
-        return None;
-    }
-    let count = u16_le(ico, 4)? as usize;
-    let mut best: Option<(usize, usize)> = None;
-    for index in 0..count {
-        let entry = 6 + index * 16;
-        if entry + 16 > ico.len() {
-            return None;
-        }
-        let width = if ico[entry] == 0 {
-            256
-        } else {
-            ico[entry] as usize
-        };
-        let height = if ico[entry + 1] == 0 {
-            256
-        } else {
-            ico[entry + 1] as usize
-        };
-        let size = u32_le(ico, entry + 8)? as usize;
-        let offset = u32_le(ico, entry + 12)? as usize;
-        if offset.checked_add(size)? > ico.len() {
-            return None;
-        }
-        let score = width.abs_diff(32) + height.abs_diff(32);
-        if best.map_or(true, |(_, best_score)| score < best_score) {
-            best = Some((index, score));
-        }
-    }
-
-    let index = best?.0;
-    let entry = 6 + index * 16;
-    let size = u32_le(ico, entry + 8)? as usize;
-    let offset = u32_le(ico, entry + 12)? as usize;
-    Some(&ico[offset..offset + size])
-}
-
-fn u16_le(data: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(
-        data.get(offset..offset + 2)?.try_into().ok()?,
-    ))
-}
-
-fn u32_le(data: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        data.get(offset..offset + 4)?.try_into().ok()?,
-    ))
 }
 
 unsafe fn notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
