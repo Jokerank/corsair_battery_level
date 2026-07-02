@@ -138,8 +138,8 @@ const PROFILES: &[DeviceProfile] = &[
     },
     DeviceProfile {
         pid: 0x0A3E,
-        name: "Virtuoso RGB Wireless",
-        protocol: Protocol::Legacy,
+        name: "Virtuoso RGB Wireless SE",
+        protocol: Protocol::Virtuoso,
     },
     DeviceProfile {
         pid: 0x0A40,
